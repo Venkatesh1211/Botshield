@@ -8,45 +8,44 @@ from datetime import datetime, timedelta
 import time
 from Aichatbot.chat import chat
 from functools import wraps
+import os
 
 # App password for sending emails
-app_password = "wyhw yrii mhen nhxg"  # Replace with your new app password
+app_password = "wyhw yrii mhen nhxg"
 
 app = Flask(__name__)
 app.secret_key = 'behavior'
 
 # Loading the trained model
- # model = joblib.load(r"C:\OneDrive\Desktop\Bot\user_behaviour_tracking\deploy\decision_tree_user1.pkl")
 model = joblib.load("decision_tree_user1.pkl")
 
-
 # Dictionaries to track failed attempts, lockouts, and email cooldowns
-email_cooldown = {}  # Store last email time for each user
-bot_detected_sessions = set()  # Store sessions that have already detected a bot
-bot_lockout_times = {}  # Store the lockout times for detected bots
-failed_attempts = {}  # Track failed login attempts per username
-ip_failed_attempts = {}  # Track failed login attempts per IP address
-lockout_duration = 300  # 5 minutes in seconds
-max_failed_attempts = 5  # Maximum allowed failed attempts before lockout
-email_alert_threshold = 3  # Send email alert after 3 failed attempts
+email_cooldown = {}
+bot_detected_sessions = set()
+bot_lockout_times = {}
+failed_attempts = {}
+ip_failed_attempts = {}
+lockout_duration = 300
+max_failed_attempts = 5
+email_alert_threshold = 3
 
 def connect_to_db():
-    """
-    Connect to the PostgreSQL database.
-
-    Returns:
-        connection: A connection object to the PostgreSQL database.
-    """
-    return psycopg2.connect(
-        user="postgres",
-        password="Venky@123",
-        host="localhost",
-        port=5432,
-        database="mouse_patterns"
-    )
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        return psycopg2.connect(database_url)
+    else:
+        return psycopg2.connect(
+            user="postgres",
+            password="Venky@123",
+            host="localhost",
+            port=5432,
+            database="mouse_patterns"
+        )
 
 conn = connect_to_db()
 cursor = conn.cursor()
+
+# ... (rest of your code remains the same)
 
 def initialize_database():
     """
