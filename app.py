@@ -11,7 +11,7 @@ from functools import wraps
 import os
 
 # App password for sending emails
-app_password = "wyhw yrii mhen nhxg"
+app_password = "wyhw yrii mhen nhxg"  # Replace with your actual app password
 
 app = Flask(__name__)
 app.secret_key = 'behavior'
@@ -20,14 +20,14 @@ app.secret_key = 'behavior'
 model = joblib.load("decision_tree_user1.pkl")
 
 # Dictionaries to track failed attempts, lockouts, and email cooldowns
-email_cooldown = {}
-bot_detected_sessions = set()
-bot_lockout_times = {}
-failed_attempts = {}
-ip_failed_attempts = {}
-lockout_duration = 300
-max_failed_attempts = 5
-email_alert_threshold = 3
+email_cooldown = {}  # Store last email time for each user
+bot_detected_sessions = set()  # Store sessions that have already detected a bot
+bot_lockout_times = {}  # Store the lockout times for detected bots
+failed_attempts = {}  # Track failed login attempts per username
+ip_failed_attempts = {}  # Track failed login attempts per IP address
+lockout_duration = 300  # 5 minutes in seconds
+max_failed_attempts = 5  # Maximum allowed failed attempts before lockout
+email_alert_threshold = 3  # Send email alert after 3 failed attempts
 
 def connect_to_db():
     """
@@ -39,7 +39,7 @@ def connect_to_db():
         ValueError: If DATABASE_URL is not set in production.
     """
     database_url = os.getenv("DATABASE_URL")
-    print(f"DEBUG: DATABASE_URL = {database_url}")  # Debug line
+    print(f"DEBUG: DATABASE_URL = {database_url}")  # Debug line for troubleshooting
     if not database_url:
         if os.getenv("RENDER"):  # Check if running on Render
             raise ValueError("DATABASE_URL environment variable is not set on Render")
@@ -61,6 +61,7 @@ def initialize_database():
     Initialize the database by creating necessary tables if they don't exist.
     """
     try:
+        # Create behavior_tracking table with scroll_speed column
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS behavior_tracking (
                 id SERIAL PRIMARY KEY,
@@ -72,6 +73,7 @@ def initialize_database():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Create failed_login_attempts table if it doesn't exist
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS failed_login_attempts (
                 id SERIAL PRIMARY KEY,
@@ -80,6 +82,7 @@ def initialize_database():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Create login table if it doesn't exist (assumed for login validation)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS login (
                 user_id SERIAL PRIMARY KEY,
@@ -109,24 +112,35 @@ except Exception as e:
     conn.rollback()
 
 def is_account_locked(username):
+    """
+    Check if the account is locked due to too many failed login attempts.
+    """
     if username in failed_attempts and failed_attempts[username]['locked']:
         remaining_time = lockout_duration - (time.time() - failed_attempts[username]['lock_time'])
         if remaining_time > 0:
             return True, int(remaining_time)
         else:
+            # Clear lock if time has passed
             del failed_attempts[username]
     return False, 0
 
 def is_ip_locked(ip_address):
+    """
+    Check if the IP address is locked due to too many failed login attempts.
+    """
     if ip_address in ip_failed_attempts and ip_failed_attempts[ip_address]['locked']:
         remaining_time = lockout_duration - (time.time() - ip_failed_attempts[ip_address]['lock_time'])
         if remaining_time > 0:
             return True, int(remaining_time)
         else:
+            # Clear lock if time has passed
             del ip_failed_attempts[ip_address]
     return False, 0
 
 def log_failed_attempt(username, ip_address):
+    """
+    Log a failed login attempt in the database.
+    """
     try:
         cursor.execute("""
             INSERT INTO failed_login_attempts (username, ip_address, timestamp)
@@ -134,6 +148,7 @@ def log_failed_attempt(username, ip_address):
         """, (username, ip_address))
         conn.commit()
     except psycopg2.errors.UndefinedTable:
+        # If the table doesn't exist, create it and retry
         print("Table 'failed_login_attempts' not found. Creating it now...")
         cursor.execute("""
             CREATE TABLE failed_login_attempts (
@@ -144,6 +159,7 @@ def log_failed_attempt(username, ip_address):
             )
         """)
         conn.commit()
+        # Retry the insert
         cursor.execute("""
             INSERT INTO failed_login_attempts (username, ip_address, timestamp)
             VALUES (%s, %s, NOW())
@@ -340,7 +356,6 @@ def track_behavior():
     user_name = session.get('user_name', 'Unknown')
     is_logout = data.get('is_logout', False)
     
-    session_id = session.get('user_id')
     ip_address = request.remote_addr
     
     if user_id in bot_detected_sessions:
@@ -430,6 +445,9 @@ def init_db():
         return jsonify({"error": str(e)}), 500
 
 def send_email_alert(to_email, subject, body):
+    """
+    Send an email alert to the user.
+    """
     sender_email = "botshield6@gmail.com"
     msg = MIMEMultipart()
     msg['From'] = sender_email
