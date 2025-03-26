@@ -30,10 +30,20 @@ max_failed_attempts = 5
 email_alert_threshold = 3
 
 def connect_to_db():
+    """
+    Connect to the PostgreSQL database using environment variables.
+
+    Returns:
+        connection: A connection object to the PostgreSQL database.
+    Raises:
+        ValueError: If DATABASE_URL is not set in production.
+    """
     database_url = os.getenv("DATABASE_URL")
-    if database_url:
-        return psycopg2.connect(database_url)
-    else:
+    print(f"DEBUG: DATABASE_URL = {database_url}")  # Debug line
+    if not database_url:
+        if os.getenv("RENDER"):  # Check if running on Render
+            raise ValueError("DATABASE_URL environment variable is not set on Render")
+        # Fallback for local development only
         return psycopg2.connect(
             user="postgres",
             password="Venky@123",
@@ -41,36 +51,41 @@ def connect_to_db():
             port=5432,
             database="mouse_patterns"
         )
+    return psycopg2.connect(database_url)
 
 conn = connect_to_db()
 cursor = conn.cursor()
-
-# ... (rest of your code remains the same)
 
 def initialize_database():
     """
     Initialize the database by creating necessary tables if they don't exist.
     """
     try:
-        # Create behavior_tracking table with scroll_speed column
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS behavior_tracking (
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER,
                 name VARCHAR(255),
                 typing_speed FLOAT,
-                scroll_speed FLOAT,  -- Added scroll_speed column
+                scroll_speed FLOAT,
                 status VARCHAR(50),
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Create failed_login_attempts table if it doesn't exist
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS failed_login_attempts (
                 id SERIAL PRIMARY KEY,
                 username VARCHAR(255),
                 ip_address VARCHAR(45),
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS login (
+                user_id SERIAL PRIMARY KEY,
+                name VARCHAR(255),
+                email VARCHAR(255) UNIQUE,
+                password VARCHAR(255)
             )
         """)
         conn.commit()
@@ -94,51 +109,24 @@ except Exception as e:
     conn.rollback()
 
 def is_account_locked(username):
-    """
-    Check if the account is locked due to too many failed login attempts.
-
-    Args:
-        username (str): The username to check.
-
-    Returns:
-        tuple: (bool, int) - (True if locked, remaining lockout time in seconds)
-    """
     if username in failed_attempts and failed_attempts[username]['locked']:
         remaining_time = lockout_duration - (time.time() - failed_attempts[username]['lock_time'])
         if remaining_time > 0:
             return True, int(remaining_time)
         else:
-            # Clear lock if time has passed
             del failed_attempts[username]
     return False, 0
 
 def is_ip_locked(ip_address):
-    """
-    Check if the IP address is locked due to too many failed login attempts.
-
-    Args:
-        ip_address (str): The IP address to check.
-
-    Returns:
-        tuple: (bool, int) - (True if locked, remaining lockout time in seconds)
-    """
     if ip_address in ip_failed_attempts and ip_failed_attempts[ip_address]['locked']:
         remaining_time = lockout_duration - (time.time() - ip_failed_attempts[ip_address]['lock_time'])
         if remaining_time > 0:
             return True, int(remaining_time)
         else:
-            # Clear lock if time has passed
             del ip_failed_attempts[ip_address]
     return False, 0
 
 def log_failed_attempt(username, ip_address):
-    """
-    Log a failed login attempt in the database.
-
-    Args:
-        username (str): The username that attempted to log in.
-        ip_address (str): The IP address of the client.
-    """
     try:
         cursor.execute("""
             INSERT INTO failed_login_attempts (username, ip_address, timestamp)
@@ -146,7 +134,6 @@ def log_failed_attempt(username, ip_address):
         """, (username, ip_address))
         conn.commit()
     except psycopg2.errors.UndefinedTable:
-        # If the table doesn't exist, create it and retry
         print("Table 'failed_login_attempts' not found. Creating it now...")
         cursor.execute("""
             CREATE TABLE failed_login_attempts (
@@ -157,7 +144,6 @@ def log_failed_attempt(username, ip_address):
             )
         """)
         conn.commit()
-        # Retry the insert
         cursor.execute("""
             INSERT INTO failed_login_attempts (username, ip_address, timestamp)
             VALUES (%s, %s, NOW())
@@ -186,19 +172,15 @@ def dashboard():
 
 @app.route('/login')
 def login():
-    # Check if the user or IP is locked
     email = session.get('last_attempted_email', '')
     ip_address = request.remote_addr
     account_locked, account_remaining_time = is_account_locked(email)
     ip_locked, ip_remaining_time = is_ip_locked(ip_address)
     
-    # Determine if the user is locked and the remaining time
     is_locked = account_locked or ip_locked
     remaining_time = max(account_remaining_time, ip_remaining_time) if is_locked else 0
     
-    # Flash the lockout message only if the user is locked and the message hasn't been flashed yet
     if is_locked:
-        # Check if the lockout message is already in the flashed messages to avoid duplication
         flashed_messages = [msg for cat, msg in get_flashed_messages(with_categories=True)]
         lockout_message = f'Account or IP locked due to too many failed attempts. Please wait {remaining_time} seconds before trying again.'
         if lockout_message not in flashed_messages:
@@ -212,20 +194,16 @@ def login_validation():
     password = request.form.get('password')
     ip_address = request.remote_addr
 
-    # Store the email in the session for use in the login route
     session['last_attempted_email'] = email
 
-    # Check if the account is locked
     account_locked, account_remaining_time = is_account_locked(email)
     if account_locked:
         return redirect('/login')
 
-    # Check if the IP is locked
     ip_locked, ip_remaining_time = is_ip_locked(ip_address)
     if ip_locked:
         return redirect('/login')
 
-    # Check if the IP is in bot lockout period
     if ip_address in bot_lockout_times:
         lockout_time = bot_lockout_times[ip_address]
         if datetime.now() < lockout_time:
@@ -233,10 +211,8 @@ def login_validation():
             flash(f'Access denied due to bot detection. Please wait {remaining_time} seconds before trying again.', 'danger')
             return redirect('/login')
         else:
-            # Lockout period expired, remove from tracking
             del bot_lockout_times[ip_address]
 
-    # Validate user credentials
     cursor.execute("SELECT user_id, name, email FROM login WHERE email = %s AND password = %s", (email, password))
     user = cursor.fetchone()
 
@@ -244,9 +220,8 @@ def login_validation():
         session['user_id'] = user[0]
         session['user_name'] = user[1]
         session['user_email'] = user[2]
-        session['session_count'] = 1  # Initialize session count to 1 on login
+        session['session_count'] = 1
         
-        # Reset failed attempts on successful login
         if email in failed_attempts:
             del failed_attempts[email]
         if ip_address in ip_failed_attempts:
@@ -254,20 +229,16 @@ def login_validation():
         
         return redirect('/starter')
     else:
-        # Track failed attempts for username
         if email not in failed_attempts:
             failed_attempts[email] = {'count': 0, 'locked': False}
         failed_attempts[email]['count'] += 1
 
-        # Track failed attempts for IP address
         if ip_address not in ip_failed_attempts:
             ip_failed_attempts[ip_address] = {'count': 0, 'locked': False}
         ip_failed_attempts[ip_address]['count'] += 1
 
-        # Log the failed attempt in the database
         log_failed_attempt(email, ip_address)
 
-        # Send email alert if threshold is reached
         if failed_attempts[email]['count'] == email_alert_threshold:
             send_email_alert(email, "Suspicious Login Attempts", f"""
             Dear User,
@@ -279,7 +250,6 @@ def login_validation():
             Bot Shield Team
             """)
 
-        # Lock the account if max attempts are reached
         if failed_attempts[email]['count'] >= max_failed_attempts:
             failed_attempts[email]['locked'] = True
             failed_attempts[email]['lock_time'] = time.time()
@@ -288,13 +258,11 @@ def login_validation():
             flash('Invalid email or password', 'danger')
             flash(f'Attempts left: {max_failed_attempts - failed_attempts[email]["count"]}', 'warning')
 
-        # Lock the IP if max attempts are reached
         if ip_failed_attempts[ip_address]['count'] >= max_failed_attempts:
             ip_failed_attempts[ip_address]['locked'] = True
             ip_failed_attempts[ip_address]['lock_time'] = time.time()
             return redirect('/login')
 
-        # Redirect to login page if not locked
         return redirect('/login')
 
 @app.route('/starter')
@@ -313,7 +281,6 @@ def get_dashboard_data():
     if not user_id:
         return jsonify({"error": "Not logged in"}), 401
 
-    # Fetch recent activities
     cursor.execute("""
         SELECT name, typing_speed, scroll_speed, status, timestamp 
         FROM behavior_tracking 
@@ -333,7 +300,6 @@ def get_dashboard_data():
             "timestamp": activity[4].strftime("%Y-%m-%d %H:%M:%S")
         })
 
-    # Calculate average typing speed
     cursor.execute("""
         SELECT AVG(typing_speed)
         FROM behavior_tracking
@@ -342,7 +308,6 @@ def get_dashboard_data():
     avg_typing_speed = cursor.fetchone()[0]
     avg_typing_speed = round(float(avg_typing_speed), 1) if avg_typing_speed else 0.0
 
-    # Calculate average scroll speed
     cursor.execute("""
         SELECT AVG(scroll_speed)
         FROM behavior_tracking
@@ -351,10 +316,8 @@ def get_dashboard_data():
     avg_scroll_speed = cursor.fetchone()[0]
     avg_scroll_speed = round(float(avg_scroll_speed), 1) if avg_scroll_speed else 0.0
 
-    # Get total sessions
     total_sessions = session.get('session_count', 1)
 
-    # Get flagged sessions
     cursor.execute("SELECT COUNT(*) FROM behavior_tracking WHERE user_id = %s AND status = 'Bot'", (user_id,))
     flagged_sessions = cursor.fetchone()[0]
 
@@ -370,7 +333,7 @@ def get_dashboard_data():
 def track_behavior():
     data = request.json
     typing_speed = data.get('typing_speed', 0)
-    scroll_speed = data.get('scroll_speed', 0)  # Added scroll_speed
+    scroll_speed = data.get('scroll_speed', 0)
     suspicious_count = data.get('suspicious_count', 0)
     paste_count = data.get('paste_count', 0)
     user_id = session.get('user_id')
@@ -392,7 +355,6 @@ def track_behavior():
     reasons = []
     status = "Human"
     
-    # Bot detection based on typing speed, paste count, and scroll speed
     if suspicious_count >= 3 or paste_count >= 2 or scroll_speed > 5000:
         if typing_speed > 10 or paste_count >= 2 or scroll_speed > 5000:
             is_bot = True
@@ -404,7 +366,6 @@ def track_behavior():
                 reasons.append("Multiple paste operations detected")
             status = "Bot"
     
-    # Store scroll_speed in the database
     cursor.execute("""
         INSERT INTO behavior_tracking (user_id, name, typing_speed, scroll_speed, status, timestamp)
         VALUES (%s, %s, %s, %s, %s, NOW())
@@ -413,7 +374,7 @@ def track_behavior():
     
     if is_bot:
         bot_detected_sessions.add(user_id)
-        bot_lockout_times[ip_address] = datetime.now() + timedelta(seconds=54)  # 54 seconds lockout
+        bot_lockout_times[ip_address] = datetime.now() + timedelta(seconds=54)
         
         user_email = session.get('user_email')
         if user_email:
@@ -444,7 +405,6 @@ def track_behavior():
 @app.route('/api/init_db', methods=['POST'])
 def init_db():
     try:
-        # Create behavior_tracking table with scroll_speed column
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS behavior_tracking (
                 id SERIAL PRIMARY KEY,
@@ -456,7 +416,6 @@ def init_db():
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Create failed_login_attempts table if it doesn't exist
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS failed_login_attempts (
                 id SERIAL PRIMARY KEY,
@@ -471,14 +430,6 @@ def init_db():
         return jsonify({"error": str(e)}), 500
 
 def send_email_alert(to_email, subject, body):
-    """
-    Send an email alert to the user.
-
-    Args:
-        to_email (str): The recipient's email address.
-        subject (str): The subject of the email.
-        body (str): The body of the email.
-    """
     sender_email = "botshield6@gmail.com"
     msg = MIMEMultipart()
     msg['From'] = sender_email
@@ -542,17 +493,13 @@ def index1page():
 def successfulpage():
     return render_template('successful.html')
 
-
 @app.route("/temp.html")
 def temppage():
     return render_template('temp.html')
 
-
 @app.route("/test.html")
 def testpage():
     return render_template('test.html')
-
-
 
 if __name__ == "__main__":
     app.run(port=2000, debug=True)
